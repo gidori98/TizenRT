@@ -63,6 +63,7 @@
 
 #include <fcntl.h>
 #include <tinyara/gidori.h>
+#include <sys/ioctl.h>
 
 //***************************************************************************
 // Definitions
@@ -151,8 +152,14 @@ extern "C"
 {
 	int helloxx_main(int argc, char *argv[])
 	{
+		char buf[BUFFER_SIZE];
+
 		int fd = open("/dev/gidori", O_RDWR);
 		
+		ioctl(fd, GIDORI_WRITE, (unsigned long)"babo");
+		ioctl(fd, GIDORI_READ, (unsigned long)buf);
+
+		printf("buf : %s \n", (char *)buf);
 // 		// Print the cpp version used
 // 		printf("c++ version used : %d\n", __cplusplus);
 
