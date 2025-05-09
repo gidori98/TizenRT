@@ -60,6 +60,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/mount.h>
+#include <tinyara/gidori.h>
 
 #include <tinyara/fs/mksmartfs.h>
 #include <tinyara/board.h>
@@ -192,6 +193,12 @@ void board_spi_initialize(void)
 	spi_pminitialize();
 #endif
 #endif /* CONFIG_SPI */
+}
+
+void board_gidori_initialize(void)
+{
+	FAR struct gidori_dev_buf dev;
+	gidori_register(&dev);
 }
 
 void board_i2c_initialize(void)
@@ -482,6 +489,7 @@ void board_initialize(void)
 	board_i2c_initialize();
 	board_spi_initialize();
 	board_i2s_initialize();
+	board_gidori_initialize();
 
 #ifdef CONFIG_LCD_ST7789
 	rtl8730_st7789_initialize();
