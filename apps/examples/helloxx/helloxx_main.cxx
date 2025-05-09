@@ -61,6 +61,9 @@
 
 #include <tinyara/init.h>
 
+#include <fcntl.h>
+#include <tinyara/gidori.h>
+
 //***************************************************************************
 // Definitions
 //***************************************************************************
@@ -148,32 +151,34 @@ extern "C"
 {
 	int helloxx_main(int argc, char *argv[])
 	{
-		// Print the cpp version used
-		printf("c++ version used : %d\n", __cplusplus);
+		int fd = open("/dev/gidori", O_RDWR);
+		
+// 		// Print the cpp version used
+// 		printf("c++ version used : %d\n", __cplusplus);
 
-		// Exercise an explictly instantiated C++ object
+// 		// Exercise an explictly instantiated C++ object
 
-		CHelloWorld *pHelloWorld = new CHelloWorld;
-		printf("helloxx_main: Saying hello from the dynamically constructed instance\n");
-		pHelloWorld->HelloWorld();
+// 		CHelloWorld *pHelloWorld = new CHelloWorld;
+// 		printf("helloxx_main: Saying hello from the dynamically constructed instance\n");
+// 		pHelloWorld->HelloWorld();
 
-		// Exercise an C++ object instantiated on the stack
+// 		// Exercise an C++ object instantiated on the stack
 
-#ifndef CONFIG_EXAMPLES_HELLOXX_NOSTACKCONST
-		CHelloWorld HelloWorld;
+// #ifndef CONFIG_EXAMPLES_HELLOXX_NOSTACKCONST
+// 		CHelloWorld HelloWorld;
 
-		printf("helloxx_main: Saying hello from the instance constructed on the stack\n");
-		HelloWorld.HelloWorld();
-#endif
+// 		printf("helloxx_main: Saying hello from the instance constructed on the stack\n");
+// 		HelloWorld.HelloWorld();
+// #endif
 
-		// Exercise an statically constructed C++ object
+// 		// Exercise an statically constructed C++ object
 
-#if defined(CONFIG_HAVE_CXXINITIALIZE) || defined(CONFIG_BINFMT_CONSTRUCTORS)
-		printf("helloxx_main: Saying hello from the statically constructed instance\n");
-		g_HelloWorld.HelloWorld();
-#endif
+// #if defined(CONFIG_HAVE_CXXINITIALIZE) || defined(CONFIG_BINFMT_CONSTRUCTORS)
+// 		printf("helloxx_main: Saying hello from the statically constructed instance\n");
+// 		g_HelloWorld.HelloWorld();
+// #endif
 
-		delete pHelloWorld;
+// 		delete pHelloWorld;
 		return 0;
 	}
 }
