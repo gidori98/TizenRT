@@ -73,6 +73,9 @@ const static tash_cmdlist_t system_cmds[] = {
 #if defined(CONFIG_ENABLE_UPTIME)
 	{"uptime",   utils_uptime,       TASH_EXECMD_SYNC},
 #endif
+#if defined(CONFIG_ENABLE_GIDORI)
+	{"gidori", utils_gidori, TASH_EXECMD_SYNC},
+#endif
 	{NULL,       NULL,              0}
 };
 
