@@ -965,6 +965,65 @@ void add_dsp_flow_rules(struct syntiant_ndp_device_s *ndp)
 
 }
 
+static
+void add_dsp_flow_rules2(struct syntiant_ndp_device_s *ndp)
+{
+	int s = 0;
+	ndp120_dsp_data_flow_setup_t setup;
+
+	int src_pcm = 0;
+	int src_func = 0;
+	int src_nn = 0;
+
+	memset(&setup, 0, sizeof(setup));
+
+	// ----------
+	// COMBINED NORMAL + AEC FLOW
+	/* PCM7->FUNCx */
+	setup.src_pcm_audio[src_pcm].src_param = NDP120_DSP_DATA_FLOW_SRC_PARAM_AUD0_STEREO;
+#ifdef CONFIG_NDP120_AEC_SUPPORT
+	setup.src_pcm_audio[src_pcm].src_param |= NDP120_DSP_DATA_FLOW_SRC_PARAM_AUD1_LEFT;
+#endif
+	setup.src_pcm_audio[src_pcm].dst_param = FF_ID;
+	setup.src_pcm_audio[src_pcm].dst_type = NDP120_DSP_DATA_FLOW_DST_TYPE_FUNCTION;
+	setup.src_pcm_audio[src_pcm].algo_config_index = 0;
+	setup.src_pcm_audio[src_pcm].set_id = COMBINED_FLOW_SET_ID;
+	setup.src_pcm_audio[src_pcm].algo_exec_property = 0;
+	src_pcm++;
+
+	/* FUNCx->NN0 */
+	setup.src_function[src_func].src_param = FF_ID;
+	setup.src_function[src_func].dst_param = KEYWORD_NETWORK_ID;
+	setup.src_function[src_func].dst_type = NDP120_DSP_DATA_FLOW_DST_TYPE_NN;
+	setup.src_function[src_func].algo_config_index = -1;
+	setup.src_function[src_func].set_id = COMBINED_FLOW_SET_ID;
+	setup.src_function[src_func].algo_exec_property = 0;
+	src_func++;
+
+	/* FUNCx->HOST_EXT_AUDIO */
+	setup.src_pcm_audio[src_pcm].src_param = NDP120_DSP_DATA_FLOW_SRC_PARAM_AUD0_LEFT;
+	setup.src_pcm_audio[src_pcm].dst_param = NDP120_DSP_DATA_FLOW_DST_SUBTYPE_AUDIO;
+	setup.src_pcm_audio[src_pcm].dst_type = NDP120_DSP_DATA_FLOW_DST_TYPE_HOST_EXTRACT;
+	setup.src_pcm_audio[src_pcm].algo_config_index = 0;
+	setup.src_pcm_audio[src_pcm].set_id = COMBINED_FLOW_SET_ID;
+	setup.src_pcm_audio[src_pcm].algo_exec_property = 0;
+	src_pcm++;
+
+	/* NN0->MCU */
+	setup.src_nn[src_nn].src_param = 0;
+	setup.src_nn[src_nn].dst_param = 0;
+	setup.src_nn[src_nn].dst_type = NDP120_DSP_DATA_FLOW_DST_TYPE_MCU;
+	setup.src_nn[src_nn].algo_config_index = -1;
+	setup.src_nn[src_nn].set_id = COMBINED_FLOW_SET_ID;
+	setup.src_nn[src_nn].algo_exec_property = 0;
+	src_nn++;
+
+	auddbg("Applied flow rules\n");
+	s = syntiant_ndp120_dsp_flow_setup_apply(ndp, &setup);
+	check_status("syntiant_ndp120_dsp_flow_setup_apply", s);
+
+}
+
 #if BT_MIC_SUPPORT == 1
 static
 void add_dsp_flow_rules_btmic(struct syntiant_ndp_device_s *ndp)
@@ -2015,3 +2074,62 @@ void ndp120_aec_disable(struct ndp120_dev_s *dev)
 	dev->extclk_inuse = false;
 }
 #endif
+
+void ndp120_test(struct ndp120_dev_s *dev, uint8_t select)
+{
+	struct syntiant_ndp120_config_pdm_s pdm_config;
+	int s;
+
+	memset(&pdm_config, 0, sizeof(pdm_config));
+
+	pdm_config.clk = SYNTIANT_NDP120_CONFIG_VALUE_PDM_CLK_OFF;
+#ifdef CONFIG_NDP120_AEC_SUPPORT
+	pdm_config.clk_mode = SYNTIANT_NDP120_CONFIG_VALUE_PDM_CLK_MODE_INTERNAL;
+#else
+	pdm_config.clk_mode = SYNTIANT_NDP120_CONFIG_VALUE_PDM_CLK_MODE_EXTERNAL;
+#endif
+
+	pdm_config.set = SYNTIANT_NDP120_CONFIG_SET_PDM_CLK
+					| SYNTIANT_NDP120_CONFIG_SET_PDM_CLK_MODE;
+
+	s = syntiant_ndp120_config_pdm(dev->ndp, &pdm_config);
+	if (check_status("config pdm clock off", s)) {
+		goto errout_ndp120_test;
+	}
+
+	switch (select)
+	{
+	case 0:
+		auddbg("[TEST] apply add_dsp_flow_rules\n");
+		add_dsp_flow_rules(dev->ndp);
+		break;
+	case 1:
+		auddbg("[TEST] apply add_dsp_flow_rules2\n");
+		add_dsp_flow_rules2(dev->ndp);
+		break;
+	default:
+		auddbg("[TEST] apply add_dsp_flow_rules\n");
+		add_dsp_flow_rules(dev->ndp);
+		break;
+	}
+
+	memset(&pdm_config, 0, sizeof(pdm_config));
+
+	pdm_config.clk = SYNTIANT_NDP120_CONFIG_VALUE_PDM_CLK_ON;
+#ifdef CONFIG_NDP120_AEC_SUPPORT
+	pdm_config.clk_mode = SYNTIANT_NDP120_CONFIG_VALUE_PDM_CLK_MODE_INTERNAL;
+#else
+	pdm_config.clk_mode = SYNTIANT_NDP120_CONFIG_VALUE_PDM_CLK_MODE_EXTERNAL;
+#endif
+
+	pdm_config.set = SYNTIANT_NDP120_CONFIG_SET_PDM_CLK
+					| SYNTIANT_NDP120_CONFIG_SET_PDM_CLK_MODE;
+
+	s = syntiant_ndp120_config_pdm(dev->ndp, &pdm_config);
+	if (check_status("config pdm clock on", s)) {
+		goto errout_ndp120_test;
+	}
+
+errout_ndp120_test:
+	return s;
+}

@@ -725,6 +725,11 @@ static int ndp120_ioctl(FAR struct audio_lowerhalf_s *dev, int cmd, unsigned lon
 		ndp120_change_kd(priv);
 		break;
 	}
+	case AUDIOIOC_CHANGEDSPFLOW: {
+		uint8_t select = (uint8_t)arg;
+		ndp120_test(priv, select);
+		break;
+	}
 	default:
 		audvdbg("ndp120_ioctl received unkown cmd 0x%x\n", cmd);
 		ret = -EINVAL;

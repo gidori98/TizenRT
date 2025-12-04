@@ -97,3 +97,15 @@ bool getStreamMuteState(stream_policy_t stream_policy, bool *mute)
 	return true;
 }
 
+bool changeDSPFlow(uint8_t select)
+{
+	meddbg("SoundManager : changeDSPFlow. select: %d\n", select);
+	audio_manager_result_t res = change_input_dsp_flow(select);
+	if (res != AUDIO_MANAGER_SUCCESS) {
+		meddbg("change_output_dsp_flow failed select : %d, ret : %d\n", select, res);
+		return false;
+	}
+	return true;
+}
+
+

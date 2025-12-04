@@ -82,6 +82,8 @@ bool setStreamMute(stream_policy_t stream_policy, bool mute);
  */
 bool getStreamMuteState(stream_policy_t stream_policy, bool *mute);
 
+bool changeDSPFlow(uint8_t select);
+
 #if defined(__cplusplus)
 }
 #endif

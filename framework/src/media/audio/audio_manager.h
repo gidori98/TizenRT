@@ -898,6 +898,8 @@ audio_manager_result_t set_audio_stream_mute_from_json(stream_policy_t stream_po
  ****************************************************************************/
 audio_manager_result_t get_audio_stream_mute_state(stream_policy_t stream_policy, bool *mute);
 
+audio_manager_result_t change_input_dsp_flow(uint8_t select);
+
 #ifdef CONFIG_DEBUG_MEDIA_INFO
 /****************************************************************************
  * Name: dump_audio_card_info
