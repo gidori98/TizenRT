@@ -6096,7 +6096,14 @@ int smart_initialize(int minor, FAR struct mtd_dev_s *mtd, FAR const char *partn
 #ifdef CONFIG_SMARTFS_MULTI_ROOT_DIRS
 		dev->minor = minor;
 #endif
-		
+	int erase_block;
+	int erase_ret;
+	for (erase_block = 0; erase_block < dev->geo.neraseblocks; erase_block++) {
+		erase_ret = MTD_ERASE(dev->mtd, erase_block, 1);
+		if (erase_ret < 0) {
+			fdbg("SMART: Erase block %d failed: %d\n", erase_block, erase_ret);
+		}
+	}
 #ifdef CONFIG_MTD_SMART_JOURNALING
 		/* Now ready to initialize journal here */
 		ret = smart_journal_init(dev);
