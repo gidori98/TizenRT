@@ -66,6 +66,7 @@
 #include <semaphore.h>
 #include <assert.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <errno.h>
 #include <debug.h>
 
@@ -81,6 +82,26 @@
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
+
+/*
+ * SmartFS operations may update several on-flash structures while holding
+ * g_sem. Releasing g_sem after an asynchronous cancellation does not make
+ * an incomplete filesystem update safe. Defer cancellation before taking
+ * g_sem, then restore the prior state only after releasing g_sem.
+ */
+
+#define SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret) \
+	do { \
+		ret = task_setcancelstate(TASK_CANCEL_DISABLE, &(oldstate)); \
+		if (ret < 0) { \
+			return ret; \
+		} \
+	} while (0)
+
+#define SMARTFS_CANCEL_GUARD_LEAVE(oldstate) \
+	do { \
+		(void)task_setcancelstate((oldstate), NULL); \
+	} while (0)
 
 /****************************************************************************
  * Private Types
@@ -174,6 +195,7 @@ static int smartfs_open(FAR struct file *filep, const char *relpath, int oflags,
 	struct inode *inode;
 	struct smartfs_mountpt_s *fs;
 	int ret;
+	int oldstate;
 	struct smartfs_ofile_s *sf;
 #ifdef CONFIG_SMARTFS_USE_SECTOR_BUFFER
 	struct smart_read_write_s readwrite;
@@ -192,8 +214,11 @@ static int smartfs_open(FAR struct file *filep, const char *relpath, int oflags,
 
 	DEBUGASSERT(fs != NULL);
 
-	/* Take the semaphore */
+	/* Do not permit an asynchronous cancellation to interrupt an on-flash
+	 * update after the SmartFS lock is acquired.
+	 */
 
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Locate the directory entry for this path */
@@ -394,6 +419,7 @@ errout_with_buffer:
 
 errout_with_semaphore:
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	if (ret == -EINVAL) {
 		ret = -EIO;
 	}
@@ -412,6 +438,8 @@ static int smartfs_close(FAR struct file *filep)
 	struct smartfs_ofile_s *sf;
 	struct smartfs_ofile_s *nextfile;
 	struct smartfs_ofile_s *prevfile;
+	int oldstate;
+	int ret;
 
 	/* Sanity checks */
 
@@ -422,6 +450,8 @@ static int smartfs_close(FAR struct file *filep)
 	inode = filep->f_inode;
 	fs = inode->i_private;
 	sf = filep->f_priv;
+
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 
 	/* Sync the file */
 
@@ -487,6 +517,7 @@ static int smartfs_close(FAR struct file *filep)
 
 okout:
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return OK;
 }
 
@@ -613,6 +644,7 @@ static ssize_t smartfs_write(FAR struct file *filep, const char *buffer, size_t 
 	uint16_t bytes;
 	size_t size = sizeof(struct smartfs_chain_header_s);
 	int ret;
+	int oldstate;
 
 	/* Sanity checks.  I have seen the following assertion misfire if
 	 * CONFIG_DEBUG_MM is enabled while re-directing output to a
@@ -637,8 +669,7 @@ static ssize_t smartfs_write(FAR struct file *filep, const char *buffer, size_t 
 
 	DEBUGASSERT(fs != NULL);
 
-	/* Take the semaphore */
-
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Test the permissions. Only allow write if the file was opened with write flags */
@@ -779,6 +810,7 @@ static ssize_t smartfs_write(FAR struct file *filep, const char *buffer, size_t 
 
 errout_with_semaphore:
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -793,6 +825,7 @@ static off_t smartfs_seek(FAR struct file *filep, off_t offset, int whence)
 	struct smartfs_ofile_s *sf;
 	int ret;
 
+	int oldstate;
 	/* Sanity checks */
 
 	DEBUGASSERT(filep->f_priv != NULL && filep->f_inode != NULL);
@@ -805,8 +838,7 @@ static off_t smartfs_seek(FAR struct file *filep, off_t offset, int whence)
 
 	DEBUGASSERT(fs != NULL);
 
-	/* Take the semaphore */
-
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Call our internal routine to perform the seek */
@@ -818,6 +850,7 @@ static off_t smartfs_seek(FAR struct file *filep, off_t offset, int whence)
 	}
 
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -847,6 +880,7 @@ static int smartfs_sync(FAR struct file *filep)
 	struct smartfs_ofile_s *sf;
 	int ret;
 
+	int oldstate;
 	/* Sanity checks */
 
 	DEBUGASSERT(filep->f_priv != NULL && filep->f_inode != NULL);
@@ -859,13 +893,13 @@ static int smartfs_sync(FAR struct file *filep)
 
 	DEBUGASSERT(fs != NULL);
 
-	/* Take the semaphore */
-
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	ret = smartfs_sync_internal(fs, sf);
 
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -960,6 +994,7 @@ static int smartfs_truncate(FAR struct file *filep, off_t length)
 	FAR struct smartfs_ofile_s *sf;
 	off_t oldsize;
 	int ret;
+	int oldstate;
 	uint16_t oldfilepos = 0;
 
 	DEBUGASSERT(filep->f_priv != NULL && filep->f_inode != NULL);
@@ -972,8 +1007,7 @@ static int smartfs_truncate(FAR struct file *filep, off_t length)
 
 	DEBUGASSERT(fs != NULL);
 
-	/* Take the semaphore */
-
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Test the permissions.  Only allow truncation if the file was opened with
@@ -1022,6 +1056,7 @@ errout_with_semaphore:
 
 	/* Relinquish exclusive access */
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -1245,18 +1280,21 @@ static int smartfs_bind(FAR struct inode *blkdriver, const void *data, void **ha
 		return -ENOMEM;
 	}
 
-	/* If the global semaphore hasn't been initialized, then
-	 * initialize it now. */
+	/* If the global semaphore hasn't been initialized, then initialize it
+	 * as an available lock.  Initializing it to zero classifies it as a
+	 * signaling semaphore, which prevents holder tracking and recovery when
+	 * the task holding the SmartFS lock is cancelled.
+	 */
 
 	fs->fs_sem = &g_sem;
 	if (!g_seminitialized) {
-		sem_init(&g_sem, 0, 0);	/* Initialize the semaphore that controls access */
+		sem_init(&g_sem, 0, 1);	/* Initialize the semaphore that controls access */
 		g_seminitialized = TRUE;
-	} else {
-		/* Take the semaphore for the mount */
-
-		smartfs_semtake(fs);
 	}
+
+	/* Serialize every mount, including the first one. */
+
+	smartfs_semtake(fs);
 
 	/* Initialize the allocated mountpt state structure.  The filesystem is
 	 * responsible for one reference on the blkdriver inode and does not
@@ -1384,6 +1422,7 @@ static int smartfs_unlink(struct inode *mountpt, const char *relpath)
 {
 	struct smartfs_mountpt_s *fs;
 	int ret;
+	int oldstate;
 	struct smartfs_entry_s entry;
 
 	/* Sanity checks */
@@ -1394,6 +1433,7 @@ static int smartfs_unlink(struct inode *mountpt, const char *relpath)
 
 	fs = mountpt->i_private;
 
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Locate the directory entry for this path */
@@ -1427,6 +1467,7 @@ errout_with_semaphore:
 		kmm_free(entry.name);
 	}
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -1441,6 +1482,7 @@ static int smartfs_mkdir(struct inode *mountpt, const char *relpath, mode_t mode
 {
 	struct smartfs_mountpt_s *fs;
 	int ret;
+	int oldstate;
 	struct smartfs_entry_s entry;
 
 	/* Sanity checks */
@@ -1451,6 +1493,7 @@ static int smartfs_mkdir(struct inode *mountpt, const char *relpath, mode_t mode
 
 	fs = mountpt->i_private;
 
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Locate the directory entry for this path */
@@ -1503,6 +1546,7 @@ errout_with_semaphore:
 		kmm_free(entry.name);
 	}
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -1517,6 +1561,7 @@ int smartfs_rmdir(struct inode *mountpt, const char *relpath)
 {
 	struct smartfs_mountpt_s *fs;
 	int ret;
+	int oldstate;
 	struct smartfs_entry_s entry;
 
 	/* Sanity checks */
@@ -1527,8 +1572,7 @@ int smartfs_rmdir(struct inode *mountpt, const char *relpath)
 
 	fs = mountpt->i_private;
 
-	/* Take the semaphore */
-
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Locate the directory entry for this path */
@@ -1578,6 +1622,7 @@ errout_with_semaphore:
 		kmm_free(entry.name);
 	}
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
@@ -1591,6 +1636,7 @@ errout_with_semaphore:
 int smartfs_rename(struct inode *mountpt, const char *oldrelpath, const char *newrelpath)
 {
 	int ret;
+	int oldstate;
 	struct smartfs_mountpt_s *fs;
 	struct smartfs_entry_s oldentry;
 	struct smartfs_entry_s newentry;
@@ -1608,6 +1654,7 @@ int smartfs_rename(struct inode *mountpt, const char *oldrelpath, const char *ne
 
 	fs = mountpt->i_private;
 
+	SMARTFS_CANCEL_GUARD_ENTER(oldstate, ret);
 	smartfs_semtake(fs);
 
 	/* Search for old entry to validate it exists */
@@ -1692,6 +1739,7 @@ errout_with_semaphore:
 	}
 
 	smartfs_semgive(fs);
+	SMARTFS_CANCEL_GUARD_LEAVE(oldstate);
 	return ret;
 }
 
