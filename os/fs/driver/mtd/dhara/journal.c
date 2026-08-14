@@ -31,9 +31,14 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <tinyara/config.h>
 #include <string.h>
+#include <stdio.h>
 #include "journal.h"
 #include "bytes.h"
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+#include "map.h"
+#endif
 #include <errno.h>
 /************************************************************************
  * Metapage binary format
@@ -208,12 +213,26 @@ static void reset_journal(struct dhara_journal *j)
 
 static void roll_stats(struct dhara_journal *j)
 {
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+	FAR const struct dhara_map *m = (FAR const struct dhara_map *)j;
+
+	printf("[DHARA] epoch wrap: epoch=%u->%u m->count=%lu "
+	       "bb_last(previous)=%lu bb_current(completed)=%lu "
+	       "flags=0x%02x head=%lu tail=%lu tail_sync=%lu root=%lu\n",
+	       (unsigned int)j->epoch, (unsigned int)(uint8_t)(j->epoch + 1),
+	       (unsigned long)m->count, (unsigned long)j->bb_last,
+	       (unsigned long)j->bb_current, (unsigned int)j->flags,
+	       (unsigned long)j->head, (unsigned long)j->tail,
+	       (unsigned long)j->tail_sync, (unsigned long)j->root);
+#endif
+
 	j->bb_last = j->bb_current;
 	j->bb_current = 0;
 	j->epoch++;
 }
 
-void dhara_journal_init(struct dhara_journal *j, const struct dhara_nand *n, uint8_t *page_buf)
+void dhara_journal_init(struct dhara_journal *j, const struct dhara_nand *n,
+			uint8_t *page_buf)
 {
 	/* Set fixed parameters */
 	j->nand = n;

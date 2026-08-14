@@ -107,6 +107,15 @@ struct mtd_geometry_s {
 	char model[NAME_MAX + 1];
 };
 
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+/* Snapshot of the Dhara journal state used by the NAND bad-block test app. */
+
+struct dhara_journal_state_s {
+	uint32_t head;
+	uint32_t tail_sync;
+};
+#endif
+
 /* The following defines the information for writing bytes to a sector
  * that are not a full page write (bytewrite).
  */
@@ -336,6 +345,11 @@ int dhara_initialize(int minor, FAR struct mtd_dev_s *mtd, const char *pathname)
 
 #ifdef CONFIG_MTD_DHARA
 int dhara_initialize_by_path(FAR const char *path, FAR struct mtd_dev_s *mtd);
+#endif
+
+#if defined(CONFIG_MTD_DHARA) && defined(CONFIG_EXAMPLES_NAND_MARK_BADBLOCK)
+int dhara_get_journal_state(FAR struct mtd_dev_s *mtd,
+			    FAR struct dhara_journal_state_s *state);
 #endif
 
 /****************************************************************************

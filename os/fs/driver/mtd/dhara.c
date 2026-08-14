@@ -129,6 +129,10 @@ static const struct block_operations g_dhara_bops = {
 #endif
 };
 
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+static FAR dhara_dev_t *g_dhara_debug_dev;
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
@@ -640,6 +644,11 @@ static int dhara_unlink(FAR struct inode *inode)
 
 	DEBUGASSERT(inode->i_private);
 	dev = inode->i_private;
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+	if (g_dhara_debug_dev == dev) {
+		g_dhara_debug_dev = NULL;
+	}
+#endif
 	sem_wait(&dev->lock);
 	dev->unlinked = true;
 	sem_post(&dev->lock);
@@ -659,6 +668,26 @@ static int dhara_unlink(FAR struct inode *inode)
  * Public Functions
  ****************************************************************************/
 /* dhara nand interface implement */
+
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+int dhara_get_journal_state(FAR struct mtd_dev_s *mtd,
+			    FAR struct dhara_journal_state_s *state)
+{
+	FAR dhara_dev_t *dev = g_dhara_debug_dev;
+	FAR struct dhara_journal *journal;
+
+	if (mtd == NULL || state == NULL || dev == NULL || dev->mtd != mtd) {
+		return -EINVAL;
+	}
+
+	sem_wait(&dev->lock);
+	journal = &dev->map.journal;
+	state->head = journal->head;
+	state->tail_sync = journal->tail_sync;
+	sem_post(&dev->lock);
+	return OK;
+}
+#endif
 
 int dhara_nand_is_bad(FAR const struct dhara_nand *n, dhara_block_t bno)
 {
@@ -896,6 +925,10 @@ int dhara_initialize_by_path(FAR const char *path, FAR struct mtd_dev_s *mtd)
 		ferr("register_blockdriver failed: %d\n", ret);
 		goto err;
 	}
+
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+	g_dhara_debug_dev = dev;
+#endif
 
 	return ret;
 

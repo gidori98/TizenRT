@@ -1,0 +1,3 @@
+ifeq ($(CONFIG_EXAMPLES_NAND_MARK_BADBLOCK),y)
+CONFIGURED_APPS += examples/nand_mark_badblock
+endif

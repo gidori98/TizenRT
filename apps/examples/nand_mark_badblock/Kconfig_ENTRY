@@ -1,0 +1,3 @@
+config ENTRY_NAND_MARK_BADBLOCK
+	bool "NAND bad-block marking example"
+	depends on EXAMPLES_NAND_MARK_BADBLOCK

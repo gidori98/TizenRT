@@ -129,6 +129,9 @@ struct part_procfs_file_s {
 
 static int part_erase(FAR struct mtd_dev_s *dev, off_t startblock, size_t nblocks);
 static int part_isbad(FAR struct mtd_dev_s *dev, off_t block);
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+static int part_markbad(FAR struct mtd_dev_s *dev, off_t block);
+#endif
 static ssize_t part_bread(FAR struct mtd_dev_s *dev, off_t startblock, size_t nblocks, FAR uint8_t *buf);
 static ssize_t part_bwrite(FAR struct mtd_dev_s *dev, off_t startblock, size_t nblocks, FAR const uint8_t *buf);
 static ssize_t part_read(FAR struct mtd_dev_s *dev, off_t offset, size_t nbytes, FAR uint8_t *buffer);
@@ -284,6 +287,37 @@ static int part_isbad(FAR struct mtd_dev_s *dev, off_t block)
         DEBUGASSERT(eoffset * priv->blkpererase == priv->firstblock);
         return priv->parent->isbad(priv->parent, block + eoffset);
 }
+
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+/****************************************************************************
+ * Name: part_markbad
+ *
+ * Description:
+ *   Mark a partition-relative erase block as bad in the parent MTD device.
+ *
+ ****************************************************************************/
+
+static int part_markbad(FAR struct mtd_dev_s *dev, off_t block)
+{
+	FAR struct mtd_partition_s *priv = (FAR struct mtd_partition_s *)dev;
+	off_t eoffset;
+
+	DEBUGASSERT(priv);
+
+	if (block < 0 || !part_blockcheck(priv, block * priv->blkpererase)) {
+		fdbg("ERROR: Markbad beyond the end of the partition\n");
+		return -ENXIO;
+	}
+
+	/* Convert the partition-relative erase block number to the parent
+	 * device's erase block number.
+	 */
+
+	eoffset = priv->firstblock / priv->blkpererase;
+	DEBUGASSERT(eoffset * priv->blkpererase == priv->firstblock);
+	return MTD_MARKBAD(priv->parent, block + eoffset);
+}
+#endif
 
 /****************************************************************************
  * Name: part_bread
@@ -798,6 +832,9 @@ FAR struct mtd_dev_s *mtd_partition(FAR struct mtd_dev_s *mtd, off_t firstblock,
 	part->child.write = mtd->write ? part_write : NULL;
 #endif
 	part->child.isbad = mtd->isbad ? part_isbad : NULL;
+#ifdef CONFIG_EXAMPLES_NAND_MARK_BADBLOCK
+	part->child.markbad = mtd->markbad ? part_markbad : NULL;
+#endif
 
 	part->parent = mtd;
 	part->firstblock = erasestart * blkpererase;

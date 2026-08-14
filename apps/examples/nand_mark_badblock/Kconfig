@@ -1,0 +1,20 @@
+#
+# For a description of the syntax of this configuration file,
+# see kconfig-language at https://www.kernel.org/doc/Documentation/kbuild/kconfig-language.txt
+#
+
+config EXAMPLES_NAND_MARK_BADBLOCK
+	bool "NAND bad-block marking example"
+	default n
+	depends on FS_LITTLEFS && MTD_DHARA && MTD_PARTITION && MTD_NAND
+	depends on !BUILD_PROTECTED && !BUILD_KERNEL
+	---help---
+		Enable the nand_mark_badblock application. It marks one LittleFS MTD
+		partition-relative erase block as bad and verifies its marker. It also
+		provides a status command that prints the BAD/ACTIVE/GOOD state of every
+		physical erase block in the partition and enables Dhara state output
+		whenever its epoch increases.
+
+config USER_ENTRYPOINT
+	string
+	default "nand_mark_badblock_main" if ENTRY_NAND_MARK_BADBLOCK
