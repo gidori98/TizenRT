@@ -26,6 +26,7 @@
 
 #include <media/InputDataSource.h>
 #include "StreamHandler.h"
+#include "AudioOutputConverter.h"
 
 #include "Decoder.h"
 #include "Demuxer.h"
@@ -46,8 +47,10 @@ class InputHandler : public StreamHandler
 public:
 	InputHandler();
 	void setInputDataSource(std::shared_ptr<InputDataSource> source);
-	bool doStandBy(size_t buffSize);
-	bool open(size_t buffSize) override;
+	bool doStandBy();
+	bool prepare();
+	bool configureOutput(unsigned int channels, unsigned int sampleRate, int format, size_t periodBytes);
+	bool startBuffering();
 	bool close() override;
 	int seekTo(off_t offset);
 	ssize_t read(unsigned char *buf, size_t size, std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
@@ -78,8 +81,11 @@ private:
 	ssize_t getPCM(unsigned char *buf, size_t size, size_t *used, unsigned char **out, size_t *expect);
 	size_t fetchData(unsigned char *buf, size_t size, size_t *used, unsigned char **out, size_t *expect);
 	ssize_t readFromSource(unsigned char *buf, size_t size);
+	ssize_t writePcmToStreamBuffer(const unsigned char *buf, size_t size);
+	bool finalizeOutput();
 
 	std::mutex mMutex;
+	std::mutex mLifecycleMutex;
 	std::condition_variable mCondv;
 	std::shared_ptr<StreamBuffer> mPreloadBuffer;
 	std::shared_ptr<InputDataSource> mInputDataSource;
@@ -87,8 +93,14 @@ private:
 	std::shared_ptr<Demuxer> mDemuxer;
 	std::weak_ptr<MediaPlayerImpl> mPlayer;
 	std::atomic<bool> mIsLooping;
-	buffer_state_t mState;
+	std::atomic<buffer_state_t> mState;
 	size_t mTotalBytes;
+	AudioOutputConverter mOutputConverter;
+	size_t mOutputPeriodBytes;
+	size_t mOutputPeriodOffset;
+	std::atomic<bool> mSourcePrepared;
+	bool mOutputFinalized;
+	std::atomic<bool> mBufferingFailed;
 };
 } // namespace stream
 } // namespace media

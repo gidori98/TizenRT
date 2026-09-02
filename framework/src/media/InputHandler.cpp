@@ -21,6 +21,7 @@
 #include <debug.h>
 #include <pthread.h>
 #include <limits.h>
+#include <new>
 #include <media/MediaUtils.h>
 
 #include "InputHandler.h"
@@ -35,7 +36,12 @@ InputHandler::InputHandler() :
 	mDecoder(nullptr),
 	mIsLooping(0),
 	mState(BUFFER_STATE_EMPTY),
-	mTotalBytes(0)
+	mTotalBytes(0),
+	mOutputPeriodBytes(0),
+	mOutputPeriodOffset(0),
+	mSourcePrepared(false),
+	mOutputFinalized(false),
+	mBufferingFailed(false)
 {
 	mWorkerStackSize = CONFIG_INPUT_DATASOURCE_STACKSIZE;
 }
@@ -46,11 +52,12 @@ void InputHandler::setInputDataSource(std::shared_ptr<InputDataSource> source)
 		meddbg("source is nullptr\n");
 		return;
 	}
+	std::lock_guard<std::mutex> lifecycleLock(mLifecycleMutex);
 	StreamHandler::setDataSource(source);
 	mInputDataSource = source;
 }
 
-bool InputHandler::doStandBy(size_t buffSize)
+bool InputHandler::doStandBy()
 {
 	auto mp = getPlayer();
 	if (!mp) {
@@ -61,7 +68,7 @@ bool InputHandler::doStandBy(size_t buffSize)
 	std::thread wk = std::thread([=]() {
 		medvdbg("InputHandler::doStandBy thread enter\n");
 		player_event_t event;
-		if (open(buffSize)) {
+		if (prepare()) {
 			event = PLAYER_EVENT_SOURCE_PREPARED;
 		} else {
 			event = PLAYER_EVENT_SOURCE_OPEN_FAILED;
@@ -74,37 +81,118 @@ bool InputHandler::doStandBy(size_t buffSize)
 	return true;
 }
 
-bool InputHandler::open(size_t buffSize)
+bool InputHandler::prepare()
 {
-	// Open stream handler and start buffering
-	if (!StreamHandler::open(buffSize)) {
-		meddbg("StreamHandler::open failed!\n");
+	std::lock_guard<std::mutex> lifecycleLock(mLifecycleMutex);
+	if (mSourcePrepared.load()) {
+		return true;
+	}
+
+	auto source = getDataSource();
+	if (!source) {
+		meddbg("DataSource is nullptr\n");
+		return false;
+	}
+	if (!(source->isPrepared() || source->open())) {
+		meddbg("Open data source failed\n");
+		return false;
+	}
+	if (!probeDataSource()) {
+		meddbg("Probe data source failed\n");
+		return false;
+	}
+	if (!registerCodec(source->getAudioType(), source->getChannels(), source->getSampleRate())) {
+		meddbg("Register codec failed\n");
 		return false;
 	}
 
-	// Wait buffering done
-	std::unique_lock<std::mutex> lock(mMutex);
-	if (mState < BUFFER_STATE_BUFFERED) {
-		medvdbg("PCM buffering...\n");
-		mCondv.wait(lock);
-		medvdbg("PCM buffering done!\n");
-	}
-
+	mSourcePrepared = true;
 	return true;
 }
 
+bool InputHandler::configureOutput(unsigned int channels, unsigned int sampleRate, int format, size_t periodBytes)
+{
+	std::lock_guard<std::mutex> lifecycleLock(mLifecycleMutex);
+	if (!mSourcePrepared.load() || periodBytes == 0 || periodBytes > SIZE_MAX / 2) {
+		meddbg("Invalid output configuration state or period size\n");
+		return false;
+	}
+
+	pcm_stream_format_t sourceFormat = {
+		mInputDataSource->getChannels(),
+		mInputDataSource->getSampleRate(),
+		mDecoder ? PCM_FORMAT_S16_LE :
+			static_cast<pcm_format>(mInputDataSource->getPcmFormat())
+	};
+	pcm_stream_format_t outputFormat = {
+		channels,
+		sampleRate,
+		static_cast<pcm_format>(format)
+	};
+	if (!mOutputConverter.configure(sourceFormat, outputFormat)) {
+		return false;
+	}
+
+	auto streamBuffer = StreamBuffer::Builder()
+							.setBufferSize(periodBytes * 2)
+							.setThreshold(periodBytes)
+							.build();
+	if (!streamBuffer) {
+		meddbg("Failed to create hardware format stream buffer\n");
+		mOutputConverter.release();
+		return false;
+	}
+
+	setStreamBuffer(streamBuffer);
+	mOutputPeriodBytes = periodBytes;
+	mOutputPeriodOffset = 0;
+	return true;
+}
+
+bool InputHandler::startBuffering()
+{
+	{
+		std::lock_guard<std::mutex> lifecycleLock(mLifecycleMutex);
+		if (!mOutputConverter.isConfigured() || !StreamHandler::start()) {
+			return false;
+		}
+	}
+
+	std::unique_lock<std::mutex> lock(mMutex);
+	while (mState.load() < BUFFER_STATE_BUFFERED && !mBufferingFailed.load()) {
+		mCondv.wait(lock);
+	}
+	return mState.load() >= BUFFER_STATE_BUFFERED && !mBufferingFailed.load();
+}
+
+
 bool InputHandler::close()
 {
-	bool ret = StreamHandler::close();
+	bool ret;
+	{
+		std::lock_guard<std::mutex> lifecycleLock(mLifecycleMutex);
+		ret = StreamHandler::close();
+		mOutputConverter.release();
+		mOutputPeriodBytes = 0;
+		mOutputPeriodOffset = 0;
+		mSourcePrepared = false;
+		mOutputFinalized = false;
+		mBufferingFailed.store(true);
+	}
 	// Terminate buffering
-	std::unique_lock<std::mutex> lock(mMutex);
-	mCondv.notify_one();
+	std::lock_guard<std::mutex> lock(mMutex);
+	mCondv.notify_all();
 	return ret;
 }
 
 int InputHandler::seekTo(off_t offset)
 {
-	return mInputDataSource->seekTo(offset);
+	std::lock_guard<std::mutex> lifecycleLock(mLifecycleMutex);
+	int ret = mInputDataSource->seekTo(offset);
+	if (ret == OK) {
+		mOutputConverter.reset();
+	}
+	return ret;
 }
 
 ssize_t InputHandler::read(unsigned char *buf, size_t size, std::chrono::milliseconds timeout)
@@ -124,51 +212,72 @@ void InputHandler::setLoop(bool loop)
 
 void InputHandler::resetWorker()
 {
-	mState = BUFFER_STATE_EMPTY;
+	mState.store(BUFFER_STATE_EMPTY);
 	mTotalBytes = 0;
+	mOutputFinalized = false;
+	mOutputPeriodOffset = 0;
+	mBufferingFailed.store(false);
+	mOutputConverter.reset();
 }
 
 bool InputHandler::processWorker()
 {
+	auto notifyFailure = [this]() {
+		mBufferingFailed.store(true);
+		std::lock_guard<std::mutex> lock(mMutex);
+		mCondv.notify_one();
+	};
+
 	size_t size = getAvailSpace();
-	if (size > 0) {
-		auto buf = new unsigned char[size];
-		if (!buf) {
-			meddbg("run out of memory! size: 0x%x\n", size);
-			return false;
-		}
+	if (size == 0) {
+		return true;
+	}
 
-		ssize_t readLen = readFromSource(buf, size);
-		if (readLen <= 0) {
-			// Error occurred, or inputting finished
-			if (!mIsLooping) {
-				mBufferWriter->setEndOfStream();
-				delete[] buf;
-				return false;
+	auto buf = new (std::nothrow) unsigned char[size];
+	if (!buf) {
+		meddbg("run out of memory! size: 0x%x\n", size);
+		notifyFailure();
+		return false;
+	}
 
-			}
-			/* If it is looping mode, then seek to 0 and readFromSource again */
-			if (mInputDataSource->seekTo(0) == OK) {
-				readLen = readFromSource(buf, size);
-			} else {
-				meddbg("seek failed!!\n");
-			}
+	ssize_t readLen = readFromSource(buf, size);
+	if (readLen <= 0 && mIsLooping) {
+		/* Reset stream-dependent resampler history before starting a new loop. */
+		if (mInputDataSource->seekTo(0) == OK) {
+			mOutputConverter.reset();
+			readLen = readFromSource(buf, size);
+		} else {
+			meddbg("seek failed!!\n");
 		}
+	}
 
-		if (readLen > (ssize_t)size) {
-			meddbg("WARNING!! it read more larger than available space!! readLen : %d size : %d\n", readLen, size);
-			readLen = size;
+	if (readLen <= 0) {
+		bool finalized = finalizeOutput();
+		if (!finalized) {
+			meddbg("Failed to finalize hardware format output\n");
 		}
-
-		ssize_t writeLen = writeToStreamBuffer(buf, (size_t)readLen);
-		delete[] buf;
-		if (writeLen <= 0) {
-			meddbg("write to stream buffer failed!\n");
-			mBufferWriter->setEndOfStream();
-			return false;
-		}
-	} else {
 		mBufferWriter->setEndOfStream();
+		delete[] buf;
+		if (!finalized) {
+			notifyFailure();
+		} else if (mState.load() < BUFFER_STATE_BUFFERED) {
+			setBufferState(BUFFER_STATE_BUFFERED);
+		}
+		return false;
+	}
+
+	if (readLen > (ssize_t)size) {
+		meddbg("WARNING!! it read more larger than available space!! readLen : %d size : %d\n", readLen, size);
+		readLen = size;
+	}
+
+	ssize_t writeLen = writeToStreamBuffer(buf, (size_t)readLen);
+	delete[] buf;
+	if (writeLen <= 0) {
+		meddbg("write to stream buffer failed!\n");
+		mBufferWriter->setEndOfStream();
+		notifyFailure();
+		return false;
 	}
 
 	return true;
@@ -187,17 +296,17 @@ void InputHandler::sleepWorker()
 
 void InputHandler::setBufferState(buffer_state_t state)
 {
-	if (mState != state) {
-		mState = state;
-		if (state >= BUFFER_STATE_BUFFERED) {
-			// Notify buffering done
-			std::unique_lock<std::mutex> lock(mMutex);
-			mCondv.notify_one();
-		}
-		auto mp = getPlayer();
-		if (mp) {
-			mp->notifyObserver(PLAYER_OBSERVER_COMMAND_BUFFER_STATECHANGED, (int)state);
-		}
+	buffer_state_t previous = mState.exchange(state);
+	if (previous == state) {
+		return;
+	}
+	if (state >= BUFFER_STATE_BUFFERED) {
+		std::unique_lock<std::mutex> lock(mMutex);
+		mCondv.notify_one();
+	}
+	auto mp = getPlayer();
+	if (mp) {
+		mp->notifyObserver(PLAYER_OBSERVER_COMMAND_BUFFER_STATECHANGED, (int)state);
 	}
 }
 
@@ -258,8 +367,11 @@ size_t InputHandler::getAvailSpace()
 		return mDecoder->getAvailSpace();
 	}
 
-	// return PCM buffer space size
-	return mBufferWriter->sizeOfSpace();
+	size_t spaces = mBufferWriter->sizeOfSpace();
+	if (mOutputConverter.isConfigured()) {
+		return mOutputConverter.getInputBytesForOutput(spaces);
+	}
+	return spaces;
 }
 
 ssize_t InputHandler::writeToStreamBuffer(unsigned char *buf, size_t size)
@@ -267,47 +379,125 @@ ssize_t InputHandler::writeToStreamBuffer(unsigned char *buf, size_t size)
 	size_t used = 0;
 	while (1) {
 		unsigned char *buffES = nullptr;
-		size_t sizeES = mDecoder ? mDecoder->getAvailSpace() : mBufferWriter->sizeOfSpace();
+		size_t sizeES = mDecoder ? mDecoder->getAvailSpace() : size;
 		ssize_t ret = getElementaryStream(buf, size, &used, &buffES, &sizeES);
 		if (ret < 0) {
 			meddbg("getElementaryStream failed! error: %d\n", ret);
 			return ret;
 		}
 		if (ret == 0) {
-			// want more data
 			break;
 		}
 
 		size_t usedES = 0;
 		while (1) {
 			unsigned char *buffPCM = buf;
-			size_t sizePCM = used;
+			size_t sizePCM = size;
 			size_t spaces = mBufferWriter->sizeOfSpace();
-			if (spaces == 0) {
+			while (spaces == 0) {
+				if (!mIsWorkerAlive) {
+					return EOF;
+				}
 				sleepWorker();
+				spaces = mBufferWriter->sizeOfSpace();
 			}
-			if (sizePCM > mBufferWriter->sizeOfSpace()) {
-				sizePCM = mBufferWriter->sizeOfSpace();
+
+			size_t sourceCapacity = mOutputConverter.isConfigured() ?
+				mOutputConverter.getInputBytesForOutput(spaces) : spaces;
+			if (sizePCM > sourceCapacity) {
+				sizePCM = sourceCapacity;
 			}
+			if (mOutputConverter.isConfigured()) {
+				size_t sourceFrameBytes = mOutputConverter.getSourceFrameBytes();
+				sizePCM -= sizePCM % sourceFrameBytes;
+			}
+			if (sizePCM == 0) {
+				continue;
+			}
+
 			ret = getPCM(buffES, sizeES, &usedES, &buffPCM, &sizePCM);
 			if (ret < 0) {
 				meddbg("getPCM failed! error: %d\n", ret);
 				return ret;
 			}
 			if (ret == 0) {
-				// want more data
 				break;
 			}
 
-			// write PCM data to stream buffer
-			size_t written = mBufferWriter->write(buffPCM, sizePCM);
-			if (written != sizePCM) {
-				meddbg("End of writting!\n");
+			ssize_t written = writePcmToStreamBuffer(buffPCM, sizePCM);
+			if (written < 0) {
+				meddbg("End of writing!\n");
 				return EOF;
 			}
 		}
 	}
 	return size;
+}
+
+ssize_t InputHandler::writePcmToStreamBuffer(const unsigned char *buf, size_t size)
+{
+	const unsigned char *output = buf;
+	ssize_t outputBytes = size;
+	if (mOutputConverter.isConfigured()) {
+		outputBytes = mOutputConverter.convert(buf, size, &output);
+		if (outputBytes < 0) {
+			meddbg("Failed to convert source PCM\n");
+			return EOF;
+		}
+	}
+
+	size_t written = mBufferWriter->write(const_cast<unsigned char *>(output), (size_t)outputBytes);
+	if (written != (size_t)outputBytes) {
+		return EOF;
+	}
+	if (mOutputPeriodBytes > 0) {
+		mOutputPeriodOffset = (mOutputPeriodOffset + written % mOutputPeriodBytes) % mOutputPeriodBytes;
+	}
+	return outputBytes;
+}
+
+bool InputHandler::finalizeOutput()
+{
+	if (mOutputFinalized) {
+		return true;
+	}
+	mOutputFinalized = true;
+
+	if (mOutputConverter.isConfigured()) {
+		const unsigned char *output = nullptr;
+		ssize_t outputBytes = mOutputConverter.drain(&output);
+		if (outputBytes < 0) {
+			meddbg("Failed to drain output resampler\n");
+			return false;
+		}
+		if (outputBytes > 0) {
+			size_t written = mBufferWriter->write(const_cast<unsigned char *>(output), (size_t)outputBytes);
+			if (written != (size_t)outputBytes) {
+				return false;
+			}
+			if (mOutputPeriodBytes > 0) {
+				mOutputPeriodOffset = (mOutputPeriodOffset + written % mOutputPeriodBytes) % mOutputPeriodBytes;
+			}
+		}
+	}
+
+	if (mOutputPeriodBytes == 0 || mOutputPeriodOffset == 0) {
+		return true;
+	}
+
+	size_t paddingBytes = mOutputPeriodBytes - mOutputPeriodOffset;
+	unsigned char *padding = new (std::nothrow) unsigned char[paddingBytes];
+	if (!padding) {
+		return false;
+	}
+	memset(padding, 0xff, paddingBytes);
+	size_t written = mBufferWriter->write(padding, paddingBytes);
+	delete[] padding;
+	if (written != paddingBytes) {
+		return false;
+	}
+	mOutputPeriodOffset = 0;
+	return true;
 }
 
 bool InputHandler::registerCodec(audio_type_t audioType, unsigned int channels, unsigned int sampleRate)
@@ -393,6 +583,7 @@ bool InputHandler::registerCodec(audio_type_t audioType, unsigned int channels, 
 void InputHandler::unregisterCodec()
 {
 	mDecoder = nullptr;
+	mDemuxer = nullptr;
 }
 
 size_t InputHandler::getDecodeFrames(unsigned char *buf, size_t *size)
@@ -487,7 +678,7 @@ size_t InputHandler::fetchData(unsigned char *buf, size_t size, size_t *used, un
 		if (*out == nullptr) {
 			// Point to unused data in `buf`
 			*out = buf + *used;
-		} else{
+		} else if (*out != buf + *used) {
 			// Copy data to the given output buffer
 			memcpy(*out, buf + *used, *expect);
 		}

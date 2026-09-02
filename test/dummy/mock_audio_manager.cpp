@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include "audio/audio_manager.h"
 #include <stdio.h>
+#include <tinyalsa/tinyalsa.h>
 #include <string.h>
 
 enum audio_io_direction_e {
@@ -211,6 +212,20 @@ unsigned int get_input_card_buffer_size(void)
 unsigned int get_output_card_buffer_size(void)
 {
 	return GetOutputCardBufferSizeReturn;
+}
+
+audio_manager_result_t get_output_audio_config(audio_output_pcm_config_t *config)
+{
+	if (!config) {
+		return AUDIO_MANAGER_INVALID_PARAM;
+	}
+	config->channels = 2;
+	config->sample_rate = 48000;
+	config->format = PCM_FORMAT_S16_LE;
+	config->period_bytes = GetOutputCardBufferSizeReturn;
+	config->period_frames = config->period_bytes / 4;
+	return config->period_frames > 0 && config->period_bytes % 4 == 0 ?
+		AUDIO_MANAGER_SUCCESS : AUDIO_MANAGER_OPERATION_FAIL;
 }
 
 audio_manager_result_t get_max_audio_volume(uint8_t *volume)

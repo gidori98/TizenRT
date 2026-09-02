@@ -68,6 +68,15 @@ enum audio_manager_result_e {
 };
 
 typedef enum audio_manager_result_e audio_manager_result_t;
+struct audio_output_pcm_config_s {
+	unsigned int channels;
+	unsigned int sample_rate;
+	int format;
+	unsigned int period_frames;
+	unsigned int period_bytes;
+};
+
+typedef struct audio_output_pcm_config_s audio_output_pcm_config_t;
 
 /**
  * @brief Type of device
@@ -159,8 +168,8 @@ audio_manager_result_t set_audio_stream_in(unsigned int channels, unsigned int s
  *
  * Description:
  *   Opening the pcm for the output stream and setup the status of the active
- *   output card. If the target sample rate is out of range from the sample rates
- *   supported by the active output audio card, a resampling flag is set.
+ *   output card. The framework must convert stream data to the actual hardware
+ *   format returned by get_output_audio_config() before starting output.
  *
  * Input parameters:
  *   channels: number of channels
@@ -194,11 +203,11 @@ int start_audio_stream_in(void *data, unsigned int frames);
  * Name: start_audio_stream_out
  *
  * Description:
- *   Write the specified frame data to the output stream.
+ *   Write exactly one hardware period to the output stream.
  *   If the output audio device have been paused, resume and proceed the writing.
- *   If the resampling flag is set, resamplings are performed for all target frames.
- *   In a multi-stream (ducking) scenario, this function can also handle mixing
- *   before writing to the hardware.
+ *   The data must already match the actual PCM format. In a multi-stream
+ *   (ducking) scenario, this function can also handle channel mixing before
+ *   writing to the hardware.
  *
  * Input parameters:
  *   data: buffer to transfer the frame data
@@ -475,6 +484,18 @@ float get_output_sample_rate_ratio(stream_info_id_t stream_id);
  *   On success, the number of bytes in buffer size of output card. Otherwise, 0.
  ****************************************************************************/
 unsigned int get_output_card_buffer_size(void);
+
+/****************************************************************************
+ * Name: get_output_audio_config
+ *
+ * Description:
+ *   Get the actual PCM format and one hardware buffer size of the active
+ *   output card. The output stream must be configured before this call.
+ *
+ * Return Value:
+ *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t get_output_audio_config(audio_output_pcm_config_t *config);
 
 /****************************************************************************
  * Name: get_input_card_buffer_size
