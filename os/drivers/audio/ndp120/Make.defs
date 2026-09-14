@@ -17,7 +17,6 @@
 ############################################################################
 
 ifeq ($(CONFIG_NDP120),y)
-CSRCS += ndp120_api.c
 CSRCS += checksum.c
 CSRCS += syntiant_ndp.c
 CSRCS += syntiant_ndp115.c
@@ -30,20 +29,16 @@ CSRCS += syntiant_ndp_error.c
 CSRCS += syntiant_package.c
 CSRCS += syntiant_portability.c
 
-ifeq ($(CONFIG_DUMP4CH_SUPPORT),y)
-CSRCS += ndp120_debug_utils.c
-endif
-
 # This should be set to the host processor clock frequency value
 CPU_FREQ ?= 1200000000
 EXTRACT_WINDOW_UTILIZATION ?= 40
 CFLAGS += -DCPU_FREQUENCY=$(CPU_FREQ)
 CFLAGS += -DEXTRACT_WINDOW_UTILIZATION=$(EXTRACT_WINDOW_UTILIZATION)
 
-CFLAGS += -I $(TOPDIR)/drivers/ai-soc/ndp120/include -DEXCLUDE_SYNTIANT_CORE_1
+CFLAGS += -I $(TOPDIR)/drivers/audio/ndp120/include -DEXCLUDE_SYNTIANT_CORE_1
 endif
 
-# Include Audio driver support
+# Include NDP120 driver support
 
-DEPPATH += --dep-path ai-soc --dep-path ai-soc/ndp120/src
-VPATH += :ai-soc :ai-soc/ndp120/src
+DEPPATH += --dep-path audio/ndp120/src
+VPATH += :audio/ndp120/src

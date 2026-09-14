@@ -72,7 +72,7 @@ endif
 
 include analog$(DELIM)Make.defs
 include audio$(DELIM)Make.defs
-include ai-soc$(DELIM)Make.defs
+include audio$(DELIM)ndp120$(DELIM)Make.defs
 include bch$(DELIM)Make.defs
 include bluetooth$(DELIM)Make.defs
 include compression$(DELIM)Make.defs

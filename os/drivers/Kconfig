@@ -248,7 +248,7 @@ endif # DRIVERS_VIDEO
 source drivers/wifi_csi/Kconfig
 
 menu "AI SoC devices"
-source drivers/ai-soc/Kconfig
+source drivers/audio/ndp120/Kconfig
 endmenu
 
 source drivers/lcd/Kconfig
