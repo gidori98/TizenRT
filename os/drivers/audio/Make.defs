@@ -81,7 +81,7 @@ CSRCS += alc1019.c
 endif
 
 ifeq ($(CONFIG_AUDIO_NDP120),y)
-CSRCS += ndp120_voice.c
+CSRCS += ndp120.c
 endif
 
 ifeq ($(CONFIG_AUDIO_ADAM110),y)
