@@ -50,17 +50,14 @@ struct ndp120_audio_worker_s {
 	pthread_t tid;
 	sem_t wake_sem;
 	sem_t ack_sem;
-	uint32_t event_flags;
-	bool data_ready_latched;
+	bool sample_data_pending;
 	bool extracting;
 	bool stop_requested;
 	bool started;
 	FAR struct ap_buffer_s *active_apb;
 	FAR struct ap_buffer_s *cancel_apb;
 	uint32_t active_generation;
-	uint32_t active_ready_seq;
 	uint32_t stream_generation;
-	uint32_t sample_ready_seq;
 	uint32_t control_seq;
 	uint32_t ack_seq;
 };

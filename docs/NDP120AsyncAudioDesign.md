@@ -19,7 +19,7 @@ NDP120 sample-ready
         -> host GPIO IRQ disable
         -> existing HPWORK schedule
             -> syntiant_ndp120_poll(clear = 1)
-            -> EXTRACT_READY이면 data_ready_latched = true
+            -> EXTRACT_READY이면 sample_data_pending = true
             -> sem_post(audio_wake_sem)
             -> mailbox/KD/error notification 처리
             -> host GPIO IRQ enable
@@ -50,7 +50,7 @@ Audio worker
 ## 3. 설계 원칙
 
 1. `audio_wake_sem`은 PCM sample 개수를 나타내지 않는다. worker를 깨우는 event semaphore로만 사용한다.
-2. 아직 처리하지 못한 data-ready 상태는 `data_ready_latched`가 보존한다.
+2. 아직 처리하지 못한 data-ready 상태는 `sample_data_pending`이 보존한다.
 3. 실제 unread byte 수는 `syntiant_ndp_extract_data()`가 돌려주는 `extracted_size`로 판단한다.
 4. APB는 enqueue 성공 시점부터 `AUDIO_CALLBACK_DEQUEUE` 시점까지 lower-half가 소유한다.
 5. `devsem`은 queue와 worker 상태를 보호하는 짧은 critical section에만 사용한다. SPI extraction과 upper callback 중에는 잡지 않는다.
@@ -80,23 +80,22 @@ Audio worker
 
 `audio_ack_sem`은 stale post를 오인하지 않도록 `control_seq`와 `ack_seq`를 함께 검사한다. stop/shutdown caller는 자신이 요청한 sequence가 acknowledge될 때까지 기다린다.
 
-### 4.3 Worker event bit
+### 4.3 Worker wake 조건
 
-`event_flags`는 `devsem`으로 보호되는 bit mask다. semaphore가 여러 번 post되거나 event가 합쳐져도 실제 처리 이유를 잃지 않게 한다.
+`audio_wake_sem`은 wakeup 수단일 뿐 wake 원인 자체를 저장하지 않는다. worker는 깨어난 뒤 `devsem`으로 보호되는 실제 상태를 확인한다.
 
-| Event bit | 설정 주체 | 설정 조건 | 주요 상태 변화 |
+| 상태 | 설정 주체 | 설정 조건 | worker 동작 |
 |---|---|---|---|
-| `AUDIO_EVT_DATA_READY` | HPWORK | poll 결과에 `EXTRACT_READY`가 포함됨 | `data_ready_latched: false -> true`, `sample_ready_seq++` |
-| `AUDIO_EVT_BUFFER_QUEUED` | `enqueuebuffer()` | APB가 `pendq`에 추가됨 | `pendq: N -> N+1` |
-| `AUDIO_EVT_START` | `start/resume` | stream extraction을 시작하거나 재개함 | `running=true`, `paused=false` |
-| `AUDIO_EVT_STOP` | `stop/release` | stream을 중지하고 APB를 회수해야 함 | `running=false`, `stop_requested=true`, `stream_generation++` |
-| `AUDIO_EVT_EXIT` | `shutdown` | worker 종료 요청 | `exit_requested=true` |
+| `sample_data_pending` | HPWORK | poll 결과에 `EXTRACT_READY`가 포함됨 | pending APB가 있으면 unread PCM 추출 |
+| `pendq` | `enqueuebuffer()` | APB enqueue | sample data가 pending이면 APB 선택 |
+| `running`, `paused` | `start/resume/pause/stop` | stream 상태 변경 | extraction 가능 여부 판단 |
+| `stop_requested` | `stop/release` | APB 회수 요청 | active/pending APB 반환 후 ack |
 
 Event producer는 다음 순서를 지킨다.
 
 ```text
 sem_wait(devsem)
-    -> 상태 변수와 event_flags 갱신
+    -> 실제 상태 변수 또는 queue 갱신
 sem_post(devsem)
 sem_post(audio_wake_sem)
 ```
@@ -131,16 +130,13 @@ classDiagram
         +pid_t tid
         +sem_t wake_sem
         +sem_t ack_sem
-        +uint32_t event_flags
-        +bool data_ready_latched
+        +bool sample_data_pending
         +bool extracting
         +bool stop_requested
         +bool exit_requested
         +ap_buffer_s active_apb
         +uint32_t active_generation
-        +uint32_t active_ready_seq
         +uint32_t stream_generation
-        +uint32_t sample_ready_seq
         +uint32_t control_seq
         +uint32_t ack_seq
     }
@@ -179,14 +175,11 @@ classDiagram
 | `tid` | invalid | initialization/shutdown | device lifetime 동안 실행되는 audio worker 식별자 |
 | `wake_sem` | 0 | semaphore 자체 | data, buffer, control event가 발생하면 worker를 깨움 |
 | `ack_sem` | 0 | semaphore 자체 + sequence | stop/shutdown 완료 통보 |
-| `event_flags` | 0 | `devsem` | wake reason을 bit mask로 저장 |
-| `data_ready_latched` | false | `devsem` | IRQ는 왔지만 APB가 없는 상태를 포함하여 unread data 가능성을 보존 |
+| `sample_data_pending` | false | `devsem` | IRQ는 왔지만 APB가 없는 상태를 포함하여 unread data 가능성을 보존 |
 | `extracting` | false | `devsem` | `active_apb`에 대한 SPI extraction 진행 여부 |
 | `active_apb` | NULL | `devsem` | APB를 여러 sample-ready event에 걸쳐 채울 때 유지하는 현재 APB |
 | `active_generation` | 0 | `devsem` | active APB를 선택했을 때의 stream generation |
-| `active_ready_seq` | 0 | `devsem` | APB 선택 시점의 `sample_ready_seq`. extraction 중 새 IRQ 발생 여부 진단에 사용 |
 | `stream_generation` | 0 | `devsem` | start/stop 경계를 구분. stop 시 증가 |
-| `sample_ready_seq` | 0 | `devsem` | 진단 및 event 추적용 sample-ready 누적 번호 |
 | `stop_requested` | false | `devsem` | worker가 active/pending APB를 반환해야 함을 표시 |
 | `exit_requested` | false | `devsem` | worker main loop 종료 요청 |
 | `control_seq`, `ack_seq` | 0 | `devsem` | stop/shutdown request와 acknowledgement 대응 |
@@ -197,14 +190,14 @@ classDiagram
 
 | 발생 event | 실행 문맥 | Semaphore 동작 | 변수/queue 변화 | 후속 동작 |
 |---|---|---|---|---|
-| APB enqueue | application ioctl | `Get(devsem)` -> `Give(devsem)` -> `Give(audio_wake_sem)` | `pendq` tail에 APB 추가, `event_flags |= BUFFER_QUEUED` | 즉시 return. worker는 data-ready가 없으면 다시 sleep |
+| APB enqueue | application ioctl | `Get(devsem)` -> `Give(devsem)` -> `Give(audio_wake_sem)` | `pendq` tail에 APB 추가 | 즉시 return. worker는 data-ready가 없으면 다시 sleep |
 | Sample-ready GPIO IRQ | ISR | audio semaphore 동작 없음 | host GPIO IRQ disable | 기존 HPWORK schedule 후 ISR return |
-| `EXTRACT_READY` 확인 | HPWORK | `Get(devsem)` -> `Give(devsem)` -> `Give(audio_wake_sem)` | `data_ready_latched=true`, `sample_ready_seq++`, `event_flags |= DATA_READY` | 다른 notification 처리 후 host GPIO IRQ enable |
+| `EXTRACT_READY` 확인 | HPWORK | `Get(devsem)` -> `Give(devsem)` -> `Give(audio_wake_sem)` | `sample_data_pending=true` | 다른 notification 처리 후 host GPIO IRQ enable |
 | Mailbox/KD/error IRQ | HPWORK | 기존 mailbox condition/MQ 사용 | 기존 notification state 변화 | audio semaphore는 `EXTRACT_READY`가 같이 있을 때만 give |
-| Worker wake | audio worker | `Get(audio_wake_sem)` -> 필요 시 `Get/Give(devsem)` | event snapshot/clear, APB pop, `extracting=true` | SPI extraction 실행 |
+| Worker wake | audio worker | `Get(audio_wake_sem)` -> 필요 시 `Get/Give(devsem)` | 실제 상태 확인, APB pop, `extracting=true` | SPI extraction 실행 |
 | Extraction 완료 | audio worker | `Get(devsem)` -> state update -> `Give(devsem)` | APB `nbytes` 증가, full이면 `active_apb=NULL`, `extracting=false` | lock 밖에서 dequeue callback |
-| Extraction 결과 0 또는 `DATA_REREAD` | audio worker | 추가 semaphore 없음 | APB 유지, 선택 시 소비한 ready latch는 false로 유지하되 extraction 중 새 IRQ가 설정한 latch는 보존 | 다음 sample-ready를 기다림 |
-| Start/Resume | control caller | `Get/Give(devsem)` -> `Give(audio_wake_sem)` | `running=true`, `paused=false`, start event 설정 | 이미 latch된 data 또는 keyword buffer가 있으면 즉시 처리 |
+| Extraction 결과 0 또는 `DATA_REREAD` | audio worker | 추가 semaphore 없음 | APB 유지, 선택 시 소비한 pending flag는 false로 유지하되 extraction 중 새 IRQ가 설정한 pending 상태는 보존 | 다음 sample-ready를 기다림 |
+| Start/Resume | control caller | `Get/Give(devsem)` -> `Give(audio_wake_sem)` | `running=true`, `paused=false` | 이미 pending인 data 또는 keyword buffer가 있으면 즉시 처리 |
 | Pause | control caller | `Get/Give(devsem)` | `paused=true`, NDP sample-ready source disable | APB queue와 active APB는 유지 |
 | Stop/Release | control caller | `Get/Give(devsem)` -> `Give(audio_wake_sem)` -> `Get(audio_ack_sem)` | `running=false`, `stop_requested=true`, generation 증가 | worker가 active/pending APB를 반환하고 ack |
 | Shutdown | control caller | `Get/Give(devsem)` -> `Give(audio_wake_sem)` -> `Get(audio_ack_sem)` | `exit_requested=true`, control sequence 증가 | worker 종료 후 ack, semaphore/thread resource 해제 |
@@ -218,7 +211,7 @@ flowchart TD
     subgraph APP[Application / Audio upper-half]
         APP_ENQ["AUDIOIOC_ENQUEUEBUFFER(apb)"]
         ENQ_LOCK["Get devsem<br/>devsem: 1 -> 0"]
-        ENQ_STATE["pendq.addlast(apb)<br/>event_flags |= BUFFER_QUEUED"]
+        ENQ_STATE["pendq.addlast(apb)"]
         ENQ_UNLOCK["Give devsem<br/>devsem: 0 -> 1"]
         ENQ_WAKE["Give audio_wake_sem<br/>worker notify"]
         ENQ_RET([즉시 return])
@@ -237,7 +230,7 @@ flowchart TD
         NOTIFY{"notification 종류"}
         OTHER["Mailbox / KD / error<br/>기존 로직 처리"]
         READY_LOCK["Get devsem"]
-        READY_STATE["data_ready_latched = true<br/>sample_ready_seq++<br/>event_flags |= DATA_READY"]
+        READY_STATE["sample_data_pending = true"]
         READY_UNLOCK["Give devsem"]
         READY_WAKE["Give audio_wake_sem<br/>worker notify"]
         IRQ_UNMASK["Host GPIO IRQ enable"]
@@ -247,16 +240,16 @@ flowchart TD
     subgraph WORKER[New audio worker thread]
         WAIT["Get audio_wake_sem<br/>sem_wait"]
         WLOCK["Get devsem"]
-        EXIT_CHECK{"EXIT / STOP event?"}
-        CONTROL["active/pending APB 분리<br/>STOP event와 stop_requested clear<br/>ack_seq = control_seq"]
+        EXIT_CHECK{"stop or exit requested?"}
+        CONTROL["active/pending APB 분리<br/>request와 stop_requested clear<br/>ack_seq = control_seq"]
         CONTROL_UNLOCK["Give devsem"]
         CONTROL_RETURN["분리한 APB를 lock 밖에서 반환"]
         CONTROL_ACK["Give audio_ack_sem"]
         CONTROL_EXIT{"exit_requested?"}
         END([Worker exit])
-        CAN_EXTRACT{"running && !paused &&<br/>(data_ready_latched || keyword_bytes_left > 0) &&<br/>(active_apb || !pendq.empty)?"}
-        SLEEP_UNLOCK["event snapshot 정리<br/>Give devsem"]
-        SELECT_APB["active_apb가 없으면 pendq pop<br/>active_generation = stream_generation<br/>active_ready_seq = sample_ready_seq<br/>현재 data_ready_latched 소비(false)<br/>extracting = true"]
+        CAN_EXTRACT{"running && !paused &&<br/>(sample_data_pending || keyword_bytes_left > 0) &&<br/>(active_apb || !pendq.empty)?"}
+        SLEEP_UNLOCK["state 확인 완료<br/>Give devsem"]
+        SELECT_APB["active_apb가 없으면 pendq pop<br/>active_generation = stream_generation<br/>현재 sample_data_pending 소비(false)<br/>extracting = true"]
         EXTRACT_UNLOCK["Give devsem"]
         EXTRACT["syntiant_ndp_extract_data<br/>FROM_UNREAD -> active_apb"]
         RESULT_LOCK["Get devsem"]
@@ -264,7 +257,7 @@ flowchart TD
         EXTRACTED{"extracted_size > 0?"}
         UPDATE["apb.nbytes += extracted_size<br/>total_size += extracted_size"]
         FULL{"apb.nbytes == apb.nmaxbytes?"}
-        HOLD["active_apb 유지<br/>extraction 중 새 IRQ가 설정한 latch는 보존"]
+        HOLD["active_apb 유지<br/>extraction 중 새 IRQ가 설정한 pending 상태는 보존"]
         COMPLETE["completed_apb = active_apb<br/>active_apb = NULL"]
         RETRY["요청 크기를 모두 읽었으면<br/>필요 시 self_wake_required = true"]
         RESULT_UNLOCK["extracting = false<br/>Give devsem"]
@@ -317,11 +310,11 @@ Activity Diagram의 `STALE -> COMPLETE` 경로에서 APB를 어떤 status와 `nb
 1. `active_apb == NULL`이면 `pendq`에서 하나를 pop한다.
 2. extraction destination은 `active_apb->samp + active_apb->nbytes`다.
 3. 요청 길이는 `nmaxbytes - nbytes`이며 NDP sample frame의 배수가 되어야 한다.
-4. APB를 선택할 때 현재 `data_ready_latched`를 소비한다. extraction 중 HPWORK가 새 latch를 설정할 수 있으므로 extraction 완료 시 이를 무조건 false로 덮어쓰면 안 된다.
+4. APB를 선택할 때 현재 `sample_data_pending`을 소비한다. extraction 중 HPWORK가 새 pending 상태를 설정할 수 있으므로 extraction 완료 시 이를 무조건 false로 덮어쓰면 안 된다.
 5. 일부만 읽었으면 `active_apb`를 유지하고 다음 sample-ready를 기다린다.
 6. APB가 가득 차면 `curbyte=0`으로 설정하고 dequeue한다.
 7. 요청 길이만큼 모두 읽었다면 NDP ring에 data가 더 있을 가능성이 있으므로 bounded self-wake로 다음 pending APB를 시도할 수 있다.
-8. extraction이 0 byte 또는 `DATA_REREAD`를 반환하면 active APB는 유지하고 다음 IRQ를 기다린다. 단, extraction 중 도착한 새 ready latch는 보존한다.
+8. extraction이 0 byte 또는 `DATA_REREAD`를 반환하면 active APB는 유지하고 다음 IRQ를 기다린다. 단, extraction 중 도착한 새 pending 상태는 보존한다.
 
 낮은 latency가 더 중요하다면 partial APB를 즉시 dequeue하는 정책도 가능하지만, buffer 크기와 callback 주기가 달라지므로 별도의 정책으로 명시해야 한다.
 
@@ -330,7 +323,7 @@ Activity Diagram의 `STALE -> COMPLETE` 경로에서 APB를 어떤 status와 `nb
 ### 9.1 시나리오 전제
 
 - 녹음은 이미 시작되어 있다: `running=true`, `paused=false`.
-- `data_ready_latched=false`, `active_apb=NULL`, `audio_wake_sem=0`이다.
+- `sample_data_pending=false`, `active_apb=NULL`, `audio_wake_sem=0`이다.
 - application이 이전에 사용한 APB `B0`를 다시 enqueue한다.
 - 이후 sample-ready IRQ 한 번에서 `B0.nmaxbytes`만큼 unread PCM을 읽을 수 있다고 가정한다.
 - dequeue message를 받은 application은 PCM을 사용한 후 `B0`를 다시 enqueue한다.
@@ -346,18 +339,18 @@ sequenceDiagram
     participant HP as NDP HPWORK
     participant NDP as NDP120
 
-    Note over Lower,AWorker: Initial: running=true, data_ready_latched=false,<br/>pendq empty, active_apb=NULL, audio_wake_sem=0
+    Note over Lower,AWorker: Initial: running=true, sample_data_pending=false,<br/>pendq empty, active_apb=NULL, audio_wake_sem=0
 
     App->>Upper: AUDIOIOC_ENQUEUEBUFFER(B0)
     Upper->>Lower: ndp120_enqueuebuffer(B0)
-    Lower->>Lower: Get(devsem), pendq.addlast(B0)<br/>event_flags |= BUFFER_QUEUED, Give(devsem)
+    Lower->>Lower: Get(devsem), pendq.addlast(B0), Give(devsem)
     Lower->>AWorker: Give(audio_wake_sem), 0 -> 1
     Lower-->>Upper: OK
     Upper-->>App: ioctl returns immediately
 
     AWorker->>AWorker: Get(audio_wake_sem), 1 -> 0
     AWorker->>Lower: Get(devsem)
-    Lower-->>AWorker: data_ready_latched=false
+    Lower-->>AWorker: sample_data_pending=false
     AWorker->>Lower: Give(devsem)
     Note over AWorker: Data가 아직 없으므로 B0는 pendq에 유지하고 sleep
 
@@ -371,7 +364,7 @@ sequenceDiagram
     HP->>NDP: syntiant_ndp120_poll(clear=1)
     NDP-->>HP: notifications = EXTRACT_READY
     HP->>Lower: Get(devsem)
-    HP->>Lower: data_ready_latched=true<br/>sample_ready_seq++<br/>event_flags |= DATA_READY
+    HP->>Lower: sample_data_pending=true
     HP->>Lower: Give(devsem)
     HP->>AWorker: Give(audio_wake_sem), 0 -> 1
     HP->>GPIO: Host GPIO IRQ enable
@@ -379,7 +372,7 @@ sequenceDiagram
 
     AWorker->>AWorker: Get(audio_wake_sem), 1 -> 0
     AWorker->>Lower: Get(devsem)
-    AWorker->>Lower: pendq.pop() -> B0<br/>active_apb=B0<br/>active_generation=stream_generation<br/>active_ready_seq=sample_ready_seq<br/>data_ready_latched=false, extracting=true
+    AWorker->>Lower: pendq.pop() -> B0<br/>active_apb=B0<br/>active_generation=stream_generation<br/>sample_data_pending=false, extracting=true
     AWorker->>Lower: Give(devsem)
 
     AWorker->>NDP: syntiant_ndp_extract_data(INPUT, FROM_UNREAD,<br/>B0.samp, B0.nmaxbytes)
@@ -406,22 +399,22 @@ sequenceDiagram
 
 | 상황 | 필요한 동작 |
 |---|---|
-| IRQ가 APB보다 먼저 발생 | `data_ready_latched=true`를 유지한다. worker가 빈 queue를 확인해도 latch를 지우지 않는다. 이후 enqueue가 worker를 깨운다. |
+| IRQ가 APB보다 먼저 발생 | `sample_data_pending=true`를 유지한다. worker가 빈 queue를 확인해도 pending 상태를 지우지 않는다. 이후 enqueue가 worker를 깨운다. |
 | APB가 IRQ보다 먼저 enqueue | APB는 `pendq`에 유지한다. enqueue wake를 소비한 worker는 data-ready가 없으면 다시 sleep한다. |
 | 여러 sample-ready가 하나의 IRQ로 합쳐짐 | semaphore 횟수에 의존하지 않고 NDP ring에서 반환된 실제 byte 수를 사용한다. |
 | 한 IRQ에 여러 APB 분량이 존재 | 한 번에 한 APB씩 bounded drain한다. 매 APB 후 control event와 새 IRQ를 확인해 mailbox/KD 처리를 장시간 지연시키지 않는다. |
 | APB가 없는 동안 ring이 overflow | 명시적인 overrun counter를 증가시키고 필요하면 `AUDIO_CALLBACK_IOERR`를 통해 XRUN을 보고한다. |
 | stop이 SPI extraction 중 발생 | stop caller가 `running=false`, generation 증가 후 worker를 깨운다. worker는 extraction 복귀 후 generation mismatch를 확인하여 APB를 반환하고 ack한다. |
 | HPWORK poll 실패 | audio worker에는 data-ready를 알리지 않는다. host IRQ를 영구 disable하지 않도록 re-enable 또는 device recovery 경로로 진입한다. |
-| `sem_post(audio_wake_sem)`이 여러 번 발생 | 정상이다. worker는 semaphore count가 아니라 `event_flags`와 latch를 기준으로 처리한다. |
+| `sem_post(audio_wake_sem)`이 여러 번 발생 | 정상이다. worker는 semaphore count가 아니라 `sample_data_pending`, queue, control state를 기준으로 처리한다. |
 | dequeue callback 중 application이 즉시 re-enqueue | callback은 `devsem` 밖에서 호출하므로 queue lock deadlock이 발생하지 않는다. |
 
 ## 11. 기존 함수별 변경 책임
 
 | 함수/영역 | 설계상 책임 |
 |---|---|
-| `ndp120_enqueuebuffer()` | 모든 APB를 `pendq`에 추가하고 `BUFFER_QUEUED` event로 worker를 깨운 뒤 즉시 반환 |
-| `ndp120_irq_handler_work()` | 기존 poll/KD/mailbox/error 처리 유지. `EXTRACT_READY`에서 latch 설정과 `audio_wake_sem` post |
+| `ndp120_enqueuebuffer()` | 모든 APB를 `pendq`에 추가하고 `audio_wake_sem`으로 worker를 깨운 뒤 즉시 반환 |
+| `ndp120_irq_handler_work()` | 기존 poll/KD/mailbox/error 처리 유지. `EXTRACT_READY`에서 pending 상태 설정과 `audio_wake_sem` post |
 | `ndp120_extract_audio()` | condition wait를 제거한 non-blocking extraction helper와, 필요하다면 legacy/debug wait 경로로 분리 |
 | `ndp120_start()` | queued APB를 동기 처리하거나 free하지 않고 state 변경, sample-ready source enable, worker wake만 수행 |
 | `ndp120_pause()/resume()` | APB 소유권은 유지하면서 sample-ready source와 `paused` 상태 제어 |
