@@ -332,6 +332,14 @@ static inline int ndp120_givesem(sem_t *sem)
 	return sem_post(sem);
 }
 
+static inline bool ndp120_trytakesem(sem_t *sem)
+{
+	int ret = sem_trywait(sem);
+
+	DEBUGASSERT(ret == OK || errno == EAGAIN);
+	return ret == OK;
+}
+
 static void *ndp120_audio_worker(pthread_addr_t pvarg)
 {
 	FAR struct ndp120_dev_s *priv =
@@ -354,16 +362,27 @@ static void *ndp120_audio_worker(pthread_addr_t pvarg)
 		bool stop_handled = false;
 		bool self_wake = false;
 		bool unreachable = false;
+		bool sample_event;
 
 		sq_init(&returnq);
 		ndp120_takesem(&priv->audio.wake_sem);
+		sample_event =
+			ndp120_trytakesem(&priv->audio.sample_event_sem);
 		ndp120_takesem(&priv->devsem);
+
+		if (sample_event && priv->running && !priv->paused) {
+			priv->audio.sample_data_pending = true;
+		}
 
 		if (priv->audio.stop_requested) {
 			priv->audio.stop_requested = false;
 			priv->audio.sample_data_pending = false;
 			priv->audio.extracting = false;
 			priv->audio.cancel_apb = NULL;
+			/* Do not carry sample events into the next stream. */
+			while (ndp120_trytakesem(
+					&priv->audio.sample_event_sem)) {
+			}
 
 			if (priv->audio.active_apb) {
 				priv->audio.active_apb->nbytes = 0;
@@ -535,8 +554,23 @@ static int ndp120_start_audio_worker(FAR struct ndp120_dev_s *priv)
 		return ret;
 	}
 
+	ret = sem_init(&priv->audio.control_sem, 0, 1);
+	if (ret != OK) {
+		sem_destroy(&priv->audio.wake_sem);
+		return ret;
+	}
+
+	ret = sem_init(&priv->audio.sample_event_sem, 0, 0);
+	if (ret != OK) {
+		sem_destroy(&priv->audio.control_sem);
+		sem_destroy(&priv->audio.wake_sem);
+		return ret;
+	}
+
 	ret = sem_init(&priv->audio.ack_sem, 0, 0);
 	if (ret != OK) {
+		sem_destroy(&priv->audio.sample_event_sem);
+		sem_destroy(&priv->audio.control_sem);
 		sem_destroy(&priv->audio.wake_sem);
 		return ret;
 	}
@@ -549,6 +583,8 @@ static int ndp120_start_audio_worker(FAR struct ndp120_dev_s *priv)
 	if (ret != OK) {
 		auddbg("ERROR: NDP120 audio worker create failed: %d\n", ret);
 		sem_destroy(&priv->audio.ack_sem);
+		sem_destroy(&priv->audio.sample_event_sem);
+		sem_destroy(&priv->audio.control_sem);
 		sem_destroy(&priv->audio.wake_sem);
 		return ret;
 	}
@@ -570,6 +606,7 @@ static int ndp120_stop_audio_stream(FAR struct ndp120_dev_s *priv)
 		return OK;
 	}
 
+	ndp120_takesem(&priv->audio.control_sem);
 	ndp120_takesem(&priv->devsem);
 	recording = priv->recording;
 	priv->running = false;
@@ -584,6 +621,7 @@ static int ndp120_stop_audio_stream(FAR struct ndp120_dev_s *priv)
 			SYNTIANT_NDP_ERROR_NONE) {
 		ret = -EIO;
 	}
+	ndp120_givesem(&priv->audio.control_sem);
 
 	ndp120_givesem(&priv->audio.wake_sem);
 	do {
@@ -894,27 +932,43 @@ static int ndp120_start(FAR struct audio_lowerhalf_s *dev)
 	}
 
 	audvdbg(" ndp120_start Entry\n");
+	ndp120_takesem(&priv->audio.control_sem);
 	ndp120_takesem(&priv->devsem);
 	if (priv->running) {
 		ndp120_givesem(&priv->devsem);
+		ndp120_givesem(&priv->audio.control_sem);
 		return OK;
 	}
 
 	if (priv->mute) {
 		ndp120_givesem(&priv->devsem);
+		ndp120_givesem(&priv->audio.control_sem);
 		return -ESTRPIPE;
 	}
 
+	if (priv->audio.stop_requested) {
+		ndp120_givesem(&priv->devsem);
+		ndp120_givesem(&priv->audio.control_sem);
+		return -EBUSY;
+	}
+
+	ndp120_givesem(&priv->devsem);
+
+	/* Mailbox completion is delivered by the IRQ worker.  Do not hold
+	 * devsem while waiting for that completion.
+	 */
 	ret = ndp120_start_sample_ready(priv);
 	if (ret != SYNTIANT_NDP_ERROR_NONE) {
-		ndp120_givesem(&priv->devsem);
+		ndp120_givesem(&priv->audio.control_sem);
 		return -EIO;
 	}
 
+	ndp120_takesem(&priv->devsem);
 	priv->running = true;
 	priv->paused = false;
 	priv->total_size = 0;
 	ndp120_givesem(&priv->devsem);
+	ndp120_givesem(&priv->audio.control_sem);
 
 	ndp120_givesem(&priv->audio.wake_sem);
 	return OK;
@@ -946,20 +1000,21 @@ static int ndp120_pause(FAR struct audio_lowerhalf_s *dev)
 #endif
 {
 	FAR struct ndp120_dev_s *priv = (FAR struct ndp120_dev_s *)dev;
+	int ret;
 
 	if (!priv) {
 		return -EINVAL;
 	}
 
+	ndp120_takesem(&priv->audio.control_sem);
 	ndp120_takesem(&priv->devsem);
 	priv->paused = true;
 	ndp120_givesem(&priv->devsem);
 
-	if (ndp120_stop_sample_ready(priv) != SYNTIANT_NDP_ERROR_NONE) {
-		return -EIO;
-	}
+	ret = ndp120_stop_sample_ready(priv);
+	ndp120_givesem(&priv->audio.control_sem);
 
-	return OK;
+	return ret == SYNTIANT_NDP_ERROR_NONE ? OK : -EIO;
 }
 
 #ifdef CONFIG_AUDIO_MULTI_SESSION
@@ -969,25 +1024,31 @@ static int ndp120_resume(FAR struct audio_lowerhalf_s *dev)
 #endif
 {
 	FAR struct ndp120_dev_s *priv = (FAR struct ndp120_dev_s *)dev;
+	int ret;
 
 	if (!priv) {
 		return -EINVAL;
 	}
 
+	ndp120_takesem(&priv->audio.control_sem);
 	ndp120_takesem(&priv->devsem);
 	if (!priv->running) {
 		ndp120_givesem(&priv->devsem);
+		ndp120_givesem(&priv->audio.control_sem);
 		return -EINVAL;
 	}
 	ndp120_givesem(&priv->devsem);
 
-	if (ndp120_start_sample_ready(priv) != SYNTIANT_NDP_ERROR_NONE) {
+	ret = ndp120_start_sample_ready(priv);
+	if (ret != SYNTIANT_NDP_ERROR_NONE) {
+		ndp120_givesem(&priv->audio.control_sem);
 		return -EIO;
 	}
 
 	ndp120_takesem(&priv->devsem);
 	priv->paused = false;
 	ndp120_givesem(&priv->devsem);
+	ndp120_givesem(&priv->audio.control_sem);
 	ndp120_givesem(&priv->audio.wake_sem);
 	return OK;
 }
@@ -3097,28 +3158,23 @@ int ndp120_irq_handler_work(struct ndp120_dev_s *dev)
 		}
 	}
 
-	if (notifications & SYNTIANT_NDP_NOTIFICATION_EXTRACT_READY) {
-		bool audio_wake = false;
+	/* Wake mailbox waiters before dispatching audio events. */
+	if (notifications & (SYNTIANT_NDP_NOTIFICATION_MAILBOX_IN |
+			SYNTIANT_NDP_NOTIFICATION_MAILBOX_OUT)) {
+		ndp120_signal_mb(dev);
+	}
 
+	if (notifications & SYNTIANT_NDP_NOTIFICATION_EXTRACT_READY) {
 		dev->sample_ready_cnt++;
 
 		/* Keep the condition signal for the blocking debug stream. */
 		ndp120_signal_sample(dev);
 
-		ndp120_takesem(&dev->devsem);
-		if (dev->running && !dev->paused) {
-			dev->audio.sample_data_pending = true;
-			audio_wake = true;
-		}
-		ndp120_givesem(&dev->devsem);
-
-		if (audio_wake) {
-			ndp120_givesem(&dev->audio.wake_sem);
-		}
-	}
-
-	if (notifications & (SYNTIANT_NDP_NOTIFICATION_MAILBOX_IN | SYNTIANT_NDP_NOTIFICATION_MAILBOX_OUT)) {
-		ndp120_signal_mb(dev);
+		/* Defer the audio state update so the IRQ worker never waits on
+		 * devsem.
+		 */
+		ndp120_givesem(&dev->audio.sample_event_sem);
+		ndp120_givesem(&dev->audio.wake_sem);
 	}
 
 	if ((notifications & SYNTIANT_NDP_NOTIFICATION_MATCH) && (dev->dev.process_mq != NULL)) {

@@ -48,7 +48,9 @@ typedef enum speech_state_e speech_state_t;
 
 struct ndp120_audio_worker_s {
 	pthread_t tid;
+	sem_t control_sem;
 	sem_t wake_sem;
+	sem_t sample_event_sem;
 	sem_t ack_sem;
 	bool sample_data_pending;
 	bool extracting;
